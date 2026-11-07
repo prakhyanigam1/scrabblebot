@@ -10,22 +10,26 @@ and the score is also paid back as coins.
 
 ## Strategy (`src/strategy.ts`)
 
-### Bidding: budget-scaled
+### Bidding: spend the budget
+Coins are worth nothing at match end and word rewards are paid back as
+coins, so the bot treats coins purely as a budget to spend.
 - **Base value** of a letter ≈ face value × 2.5 + 2 (its worth inside a long word).
 - **Rack shape:** bid up for vowels when the rack is under ~30% vowels, and for
   consonants when it's over 50%; small bonus for S, E, R; penalties for a third
   copy of a letter, Q without U, and a second J/Q/X/Z; ×0.6 once the rack is
   clogged (10+ tiles).
-- **Budget scaling:** spending coins never lowers score, so coins are only a
-  budget. Before the endgame, every bid is scaled by `balance / 40`: a rich bot
-  bids up to win letters, a poor one saves. With 13–25 tiles left in the bag,
-  bids get a further ×1.3.
+- **Floor:** always bid at least 12 (≈ the live average price) on vowels and
+  R, S, T, N, L. Held letters are options, not waste.
+- **Pacing:** if our coins per remaining auction are above 2.5 (the top
+  bots' spending rate), we're under-spending, so bids go up 1.5×. With 13–25
+  tiles left, a further ×1.3.
 - **Endgame (≤12 tiles in the bag):** a letter is worth exactly what it adds to
   the best word we could play right now. If it adds anything, bid
-  `max(2 × gain, 50% of balance)`, since leftover coins are worthless at match
-  end; if it adds nothing, don't bid.
-- **First-price auctions** (winner pays own bid) shade bids to 60% of value.
-  Vickrey auctions bid full value. Bids are always capped at our balance.
+  `max(2 × gain, 50% of balance)`, and the whole balance in the last 3
+  auctions; if it adds nothing, don't bid.
+- **No shading:** in a Vickrey auction (live matches) the winner pays the
+  second-highest bid, so bidding true value is optimal. Bids are always
+  capped at our balance.
 
 ### Word play: hold for 7+ letter words
 - Hold letters until we can spell a **7+ letter word** for the 3x multiplier.
@@ -37,6 +41,10 @@ and the score is also paid back as coins.
   score, so the first match is the best word (well under 100 ms, see tests).
 
 ### Client (`src/index.ts`)
+- Subscribes only to its own data (its credential, then its matches, their
+  auctions and results, its rack and its lobbies). Subscribing to all tables
+  streams every match on the server: ~70 s to load and a permanent backlog
+  that silently lost the bot's lobby joins.
 - Bids once per auction, re-checks for a word on every rack or bag change.
 - Word checks are throttled to one per 500 ms per match; a check that lands
   inside the window is rescheduled for when it ends rather than dropped, so
@@ -55,14 +63,9 @@ BOT_NAME=mybot TOURNAMENT_ID=<id> npm start              # enter a tournament
 ## Test and simulate
 ```sh
 npm test               # strategy checks, incl. a search-speed test
-npx tsx sim/sim.ts     # 40 offline 6-bot games per auction type
+npx tsx sim/sim.ts [games] [vickrey|first|both]
 ```
-The simulator's opponents bid letter value + 6–14 coins (capped at balance),
-matching prices seen in live matches. Latest run:
-
-| Auction type | Wins | Avg score | Best opponent avg |
-|---|---|---|---|
-| Vickrey | 38/40 | 65 | 42 |
-| First-price | 40/40 | 78 | 36 |
-
-Sim opponents use a simple greedy word rule, so live results will be tougher.
+The simulator plays `src/strategy.ts` against five opponents calibrated to
+the live top bots (LUCENT, Bron), and compares it on the same seeds with the
+baseline in `sim/strategy.before.ts`. It reports score, letters won, price
+paid, words, word length, reward per word, tiles held and coins left.

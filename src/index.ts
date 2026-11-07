@@ -191,6 +191,33 @@ function tryPlayWord(conn: DbConnection) {
   }
 }
 
+// Subscribe to just this bot's data: its matches and their auctions and
+// results, its rack, and the lobbies it's in. Join subscriptions update
+// as new matches add participant rows for us.
+function subscribeToMyData(conn: DbConnection, botId: bigint, then: () => void) {
+  const id = botId.toString();
+  conn
+    .subscriptionBuilder()
+    .onApplied(() => {
+      console.log(`[${BOT_NAME}] subscription applied`);
+      then();
+    })
+    .onError((ctx: ErrorContext) => {
+      console.error(`[${BOT_NAME}] subscription failed:`, ctx.event);
+      process.exit(1);
+    })
+    .subscribe([
+      `SELECT * FROM bot WHERE id = ${id}`,
+      "SELECT * FROM my_rack",
+      `SELECT * FROM match_participant WHERE bot_id = ${id}`,
+      `SELECT ms.* FROM match_state ms JOIN match_participant mp ON ms.id = mp.match_id WHERE mp.bot_id = ${id}`,
+      `SELECT a.* FROM auction a JOIN match_participant mp ON a.match_id = mp.match_id WHERE mp.bot_id = ${id}`,
+      `SELECT r.* FROM auction_result r JOIN match_participant mp ON r.match_id = mp.match_id WHERE mp.bot_id = ${id}`,
+      `SELECT * FROM lobby_member WHERE bot_id = ${id}`,
+      `SELECT l.* FROM lobby l JOIN lobby_member lm ON l.id = lm.lobby_id WHERE lm.bot_id = ${id}`,
+    ]);
+}
+
 function onConnect(conn: DbConnection, identity: Identity, token: string) {
   myIdentity = identity;
   saveToken(token);
@@ -199,7 +226,7 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
   conn
     .subscriptionBuilder()
     .onApplied(() => {
-      console.log(`[${BOT_NAME}] subscription applied`);
+      console.log(`[${BOT_NAME}] credential loaded`);
 
       // Resolve our bot id, possibly after claiming a nonce.
       myBotId = resolveMyBotId(conn);
@@ -218,11 +245,14 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
               );
               process.exit(1);
             }
-            const bot = conn.db.bot.id.find(myBotId);
-            console.log(
-              `[${BOT_NAME}] claimed credential for bot '${bot?.name ?? "?"}' (id ${myBotId})`,
-            );
-            bootstrapActivity(conn);
+            const botId = myBotId;
+            subscribeToMyData(conn, botId, () => {
+              const bot = conn.db.bot.id.find(botId);
+              console.log(
+                `[${BOT_NAME}] claimed credential for bot '${bot?.name ?? "?"}' (id ${botId})`,
+              );
+              bootstrapActivity(conn);
+            });
           }, 1000);
           return;
         } else {
@@ -233,13 +263,19 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
         }
       }
 
-      const bot = conn.db.bot.id.find(myBotId);
-      console.log(
-        `[${BOT_NAME}] acting as bot '${bot?.name ?? "?"}' (id ${myBotId})`,
-      );
-      bootstrapActivity(conn);
+      const botId = myBotId;
+      subscribeToMyData(conn, botId, () => {
+        const bot = conn.db.bot.id.find(botId);
+        console.log(
+          `[${BOT_NAME}] acting as bot '${bot?.name ?? "?"}' (id ${botId})`,
+        );
+        bootstrapActivity(conn);
+      });
     })
-    .subscribeToAllTables();
+    // Only our own credential at first; the rest once we know our bot id.
+    // Don't subscribe to all tables: that streams every match on the server
+    // (~70 s to load, then a permanent backlog that loses our reducer calls).
+    .subscribe(["SELECT * FROM bot_credential WHERE identity = :sender"]);
 
   conn.db.auction.onInsert((_ctx: EventContext, a) => {
     if (a.status.tag === "Open") tryBid(conn, a.id, a.matchId, a.letter);
@@ -251,7 +287,7 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
   });
   conn.db.auctionResult.onInsert((_ctx, r) => {
     if (myBotId === null) return;
-    // We subscribe to every table, so skip results from other bots' matches.
+    // Defensive: only log results from matches we're in.
     if (!participantForMatch(conn, r.matchId)) return;
     const winner =
       r.winnerBotId !== undefined && r.winnerBotId !== null

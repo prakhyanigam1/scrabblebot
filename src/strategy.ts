@@ -17,8 +17,19 @@ const CLOG_RACK = 10;
 const ENDGAME_BAG = 12;
 // Play a word to refill coins when we drop under this balance.
 const LOW_BALANCE = 12;
-// In first-price auctions we pay our own bid, so bid this fraction of value.
-const FIRST_PRICE_SHADE = 0.6;
+
+// Budget pacing. Top bots spend ~170 coins over ~68 auctions, about 2.5 a
+// round. If our coins per remaining round are above that, we're
+// under-spending: raise bids by this factor.
+const PACE_PER_ROUND = 2.5;
+const UNDERSPEND_BOOST = 1.5;
+// Always bid at least this (≈ the live average winning price) on vowels and
+// common letters: held letters are options, not waste.
+const FLOOR_BID = 12;
+const FLOOR_LETTERS = new Set(["A", "E", "I", "O", "U", "R", "S", "T", "N", "L"]);
+// In the last few auctions coins are about to be worthless: bid them all on
+// any letter that improves our best word.
+const FINAL_ROUNDS = 3;
 
 const VOWELS = new Set(["A", "E", "I", "O", "U"]);
 
@@ -175,6 +186,9 @@ export function decideBid(ctx: BidContext): number {
   // A crowded rack makes each new letter less useful.
   if (tiles >= CLOG_RACK) value *= 0.6;
 
+  // Auctions left including this one (bagLeft is the bag after drawing it).
+  const roundsLeft = bagLeft + 1;
+
   // Endgame: only pay for what it adds to a word we can play now.
   if (ctx.dictionary && bagLeft <= ENDGAME_BAG) {
     const before = bestWord(ctx.myRack, ctx.dictionary)?.score ?? 0;
@@ -182,18 +196,24 @@ export function decideBid(ctx: BidContext): number {
     withIt.set(L, have + 1);
     const after = bestWord(withIt, ctx.dictionary)?.score ?? 0;
     const gain = Math.max(0, after - before);
-    // Coins are worthless once the match ends, so go big for any gain.
-    value = gain > 0 ? Math.max(gain * 2, ctx.myBalance * 0.5) : 0;
+    // Coins are worthless once the match ends, so go big for any gain,
+    // and in the last few rounds bid everything.
+    if (gain <= 0) value = 0;
+    else if (roundsLeft <= FINAL_ROUNDS) value = ctx.myBalance;
+    else value = Math.max(gain * 2, ctx.myBalance * 0.5);
   } else {
-    // Spending coins never lowers score, so coins are only a budget.
-    // Scale bids to how much budget we have: rich = bid up, poor = save.
-    value *= ctx.myBalance / 40;
+    // Vowels and common letters are always worth a market-rate bid.
+    if (FLOOR_LETTERS.has(L)) value = Math.max(value, FLOOR_BID);
+    // Pace spending evenly over the match. myBalance already includes what
+    // our words earned, so new coins go straight back into bidding.
+    const coinsPerRoundTarget = ctx.myBalance / roundsLeft;
+    if (coinsPerRoundTarget > PACE_PER_ROUND) value *= UNDERSPEND_BOOST;
+    // Coins left at the end are worthless, so loosen up as the bag empties.
+    if (bagLeft <= 25) value *= 1.3;
   }
 
-  // Coins left at the end are worthless, so loosen up as the bag empties.
-  if (bagLeft <= 25 && bagLeft > ENDGAME_BAG) value *= 1.3;
-
-  if (ctx.firstPrice) value *= FIRST_PRICE_SHADE;
+  // No shading: in a Vickrey auction we pay the second-highest bid, so
+  // bidding true value is optimal.
 
   // Never bid more than we can pay: winning without the coins gets nothing.
   const bid = Math.round(value);
