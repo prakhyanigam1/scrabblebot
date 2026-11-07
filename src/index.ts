@@ -27,8 +27,7 @@ import {
 import { Identity } from "spacetimedb";
 import * as fs from "node:fs";
 import * as path from "node:path";
-// @ts-ignore — plain JS engine
-import * as Engine from "./engine.mjs";
+import { chooseWord, decideBid, warmUp } from "./strategy.js";
 
 const HOST = process.env.STDB_HOST ?? "https://maincloud.spacetimedb.com";
 const DB_NAME = process.env.STDB_DB ?? "scrabblebot";
@@ -50,20 +49,31 @@ function saveToken(tok: string) {
 }
 
 // Load the shared wordlist so the bot can pick playable words locally.
+// Standalone repo keeps wordlist.txt at its root; the monorepo keeps it in
+// ../spacetimedb.
 const HERE = path.dirname(new URL(import.meta.url).pathname);
-const dictionaryPath = [
-  path.join(HERE, "..", "wordlist.txt"),
-  path.join(HERE, "..", "..", "spacetimedb", "wordlist.txt"),
-].find((p) => fs.existsSync(p))!;
-const DICT = Engine.loadDictionary(dictionaryPath);
-console.log(`[${process.env.BOT_NAME ?? "bot"}] loaded ${DICT.n} words`);
+const dictionaryPath =
+  [
+    path.join(HERE, "..", "wordlist.txt"),
+    path.join(HERE, "..", "..", "spacetimedb", "wordlist.txt"),
+  ].find((p) => fs.existsSync(p)) ?? "";
+const DICTIONARY: string[] = dictionaryPath
+  ? fs
+      .readFileSync(dictionaryPath, "utf8")
+      .split("\n")
+      .map((l) => l.trim().toUpperCase())
+      .filter((l) => l.length >= 2)
+  : [];
+DICTIONARY.sort((a, b) => b.length - a.length); // longest first for greedy pick
+warmUp(DICTIONARY);
 
 let myIdentity: Identity | null = null;
 let myBotId: bigint | null = null;
 const bidsByAuction = new Set<string>();
-// Word in flight per match: don't resubmit until the rack changes or it fails.
-const wordInFlight = new Map<string, number>();
-const WORD_INFLIGHT_MS = 1500;
+const lastWordAttemptByMatch = new Map<string, number>();
+// Matches with a deferred word check already scheduled.
+const pendingWordRetry = new Set<string>();
+const WORD_RETRY_MS = 500;
 
 function resolveMyBotId(conn: DbConnection): bigint | null {
   if (!myIdentity) return null;
@@ -118,20 +128,15 @@ function tryBid(
   if (bidsByAuction.has(key)) return;
   const participant = participantForMatch(conn, matchId);
   if (!participant) return;
-  const m = conn.db.matchState.id.find(matchId);
-  let amount = 0;
-  try {
-    amount = Engine.decideBidAdvanced(DICT, {
-      letter,
-      myBalance: participant.balance,
-      myRack: rackForMatch(conn, matchId),
-      bagLeft: m ? m.bagTotal : 50,
-      firstPrice: m?.auctionType.tag === "FirstPrice",
-    });
-  } catch (e) {
-    console.warn(`[${BOT_NAME}] bid calc error`, e);
-    amount = Math.min(participant.balance, 3);
-  }
+  const match = conn.db.matchState.id.find(matchId);
+  const amount = decideBid({
+    letter,
+    myBalance: Number(participant.balance),
+    myRack: rackForMatch(conn, matchId),
+    bagLeft: match ? Number(match.bagTotal) : undefined,
+    firstPrice: match?.auctionType.tag === "FirstPrice",
+    dictionary: DICTIONARY,
+  });
   if (amount <= 0) return;
   conn.reducers
     .submitBid({ auctionId, amount: BigInt(amount) })
@@ -155,27 +160,34 @@ function tryPlayWord(conn: DbConnection) {
   const now = Date.now();
   for (const matchId of matches) {
     const key = String(matchId);
-    if (now - (wordInFlight.get(key) ?? 0) < WORD_INFLIGHT_MS) continue;
-    const m = conn.db.matchState.id.find(matchId);
-    let word: string | null = null;
-    try {
-      word = Engine.chooseWordAdvanced(
-        DICT,
-        rackForMatch(conn, matchId),
-        m ? m.bagTotal : 50,
-      );
-    } catch (e) {
-      console.warn(`[${BOT_NAME}] word calc error`, e);
+    const sinceLast = now - (lastWordAttemptByMatch.get(key) ?? 0);
+    if (sinceLast < WORD_RETRY_MS) {
+      // Too soon to try again, but don't drop the check: the rack may have
+      // changed (e.g. after our own word landed) and no further event may
+      // come, such as once the bag is empty. Re-check when the window ends.
+      if (!pendingWordRetry.has(key)) {
+        pendingWordRetry.add(key);
+        setTimeout(() => {
+          pendingWordRetry.delete(key);
+          tryPlayWord(conn);
+        }, WORD_RETRY_MS - sinceLast);
+      }
+      continue;
     }
+    lastWordAttemptByMatch.set(key, now);
+    const m = conn.db.matchState.id.find(matchId);
+    const p = participantForMatch(conn, matchId);
+    const word = chooseWord({
+      myRack: rackForMatch(conn, matchId),
+      dictionary: DICTIONARY,
+      bagLeft: m ? Number(m.bagTotal) : undefined,
+      myBalance: p ? Number(p.balance) : undefined,
+    });
     if (!word) continue;
-    wordInFlight.set(key, now);
     console.log(`[${BOT_NAME}] match ${matchId}: playing '${word}'`);
     conn.reducers
       .submitWord({ matchId, word })
-      .catch((err: unknown) => {
-        wordInFlight.delete(key);
-        logFailure(`playing '${word}'`)(err);
-      });
+      .catch(logFailure(`playing '${word}'`));
   }
 }
 
@@ -232,21 +244,15 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
   conn.db.auction.onInsert((_ctx: EventContext, a) => {
     if (a.status.tag === "Open") tryBid(conn, a.id, a.matchId, a.letter);
   });
-  const rackChanged = () => {
-    wordInFlight.clear();
-    tryPlayWord(conn);
-  };
-  conn.db.myRack.onInsert(rackChanged);
-  conn.db.myRack.onUpdate(rackChanged);
-  conn.db.myRack.onDelete(rackChanged);
-  // Bag shrinking changes our word policy (endgame dump) — re-check.
-  conn.db.matchState.onUpdate(() => tryPlayWord(conn));
-  setInterval(() => tryPlayWord(conn), 400);
+  conn.db.myRack.onInsert(() => tryPlayWord(conn));
+  conn.db.myRack.onUpdate(() => tryPlayWord(conn));
   conn.db.botCredential.onInsert(() => {
     if (myBotId === null) myBotId = resolveMyBotId(conn);
   });
   conn.db.auctionResult.onInsert((_ctx, r) => {
     if (myBotId === null) return;
+    // We subscribe to every table, so skip results from other bots' matches.
+    if (!participantForMatch(conn, r.matchId)) return;
     const winner =
       r.winnerBotId !== undefined && r.winnerBotId !== null
         ? String(r.winnerBotId)
@@ -259,6 +265,8 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
   // When a match this bot was in ends, hop back into the lobby.
   conn.db.matchState.onUpdate((_ctx, old, neu) => {
     if (myBotId === null) return;
+    // Bag shrank: re-check whether it's time to cash in held letters.
+    if (neu.status.tag === "Running") tryPlayWord(conn);
     if (old.status.tag !== "Ended" && neu.status.tag === "Ended") {
       const wasIn = Array.from(conn.db.matchParticipant.iter()).some(
         (p) => p.matchId === neu.id && p.botId === myBotId,
