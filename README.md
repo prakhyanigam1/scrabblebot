@@ -33,8 +33,9 @@ coins, so the bot treats coins purely as a budget to spend.
 
 ### Word play: hold for 7+ letter words
 - Hold letters until we can spell a **7+ letter word** for the 3x multiplier.
-- Play the best word earlier when: there's a 6+ letter word on an 8+ tile
-  rack, the rack is clogged (10+ tiles), or we're low on coins (<12).
+- Play the best word earlier only when the rack is clogged (10+ tiles). No
+  early plays for low coins or 6-letter words: 7+ letter words earn ~80% of
+  the top bots' points, and short words spend the letters they need.
 - **Endgame dump:** with ≤12 tiles left in the bag, play the best word on every
   rack change until nothing more can be spelled, so no tiles are stranded.
 - Word search uses a precomputed letter-count index of the wordlist, sorted by

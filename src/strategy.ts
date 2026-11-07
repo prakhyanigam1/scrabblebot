@@ -15,8 +15,6 @@ const TARGET_LEN = 7;
 const CLOG_RACK = 10;
 // Below this many tiles left in the bag, dump everything we can.
 const ENDGAME_BAG = 12;
-// Play a word to refill coins when we drop under this balance.
-const LOW_BALANCE = 12;
 
 // Budget pacing. Top bots spend ~170 coins over ~68 auctions, about 2.5 a
 // round. If our coins per remaining round are above that, we're
@@ -234,7 +232,7 @@ export interface WordContext {
  * Return the word (uppercase) to play, or null to skip.
  *
  * Strategy: hold letters until we can make a 7+ letter word (3x bonus).
- * Play the best word sooner if the rack is clogged, coins are low,
+ * Play the best word sooner if the rack is clogged
  * or the match is about to end.
  *
  * Keep this fast. The bot runs it on every rack change, and while it runs
@@ -247,15 +245,13 @@ export function chooseWord(ctx: WordContext): string | null {
 
   const tiles = rackSize(ctx.myRack);
   const bagLeft = ctx.bagLeft ?? 99;
-  const balance = ctx.myBalance ?? 100;
 
   const endgame = bagLeft <= ENDGAME_BAG;
   const bigWord = best.word.length >= TARGET_LEN;
   const clogged = tiles >= CLOG_RACK;
-  const broke = balance < LOW_BALANCE;
-  // A good 6-letter word on a fairly full rack is worth taking.
-  const solidSix = best.word.length >= 6 && tiles >= 8;
+  // No early plays for low coins or 6-letter words: 7+ letter words earn
+  // most of the points, and short words spend the letters they need.
 
-  if (endgame || bigWord || clogged || broke || solidSix) return best.word;
+  if (endgame || bigWord || clogged) return best.word;
   return null;
 }
