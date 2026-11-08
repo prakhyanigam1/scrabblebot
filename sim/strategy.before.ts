@@ -44,6 +44,14 @@ const PREMIUM_MAX = 30;
 // Below this many tiles no 7-letter word can be one tile away from
 // rack + letter, so the check can't apply.
 const MIN_TARGET_RACK = 5;
+
+// Match phases by tiles left in the bag (~68 auctions after the deal):
+// first third above EARLY_BAG, last third at or below LATE_BAG.
+const EARLY_BAG = 45;
+const LATE_BAG = 22;
+// Spend down: in the last third, aim to finish with about this many coins,
+// raising bids only on letters that help a word.
+const SPEND_DOWN_TO = 12;
 // In the last few auctions coins are about to be worthless: bid them all on
 // any letter that improves our best word.
 const FINAL_ROUNDS = 3;
@@ -210,6 +218,14 @@ export interface BidContext {
  * - Late in the match there's no time to build around it, so it's only
  *   worth what it adds to the best word we could play right now.
  */
+// Scale a bid up so the surplus over SPEND_DOWN_TO is spent by the end:
+// the more surplus per remaining auction, the bigger the boost.
+function spendDownBid(value: number, balance: number, roundsLeft: number): number {
+  const surplus = balance - SPEND_DOWN_TO;
+  if (surplus <= 0) return value;
+  return value * (1 + surplus / roundsLeft);
+}
+
 export function decideBid(ctx: BidContext): number {
   const L = ctx.letter;
   const face = LETTER_VALUE[L] ?? 1;
@@ -263,6 +279,7 @@ export function decideBid(ctx: BidContext): number {
     if (gain <= 0) value = 0;
     else if (roundsLeft <= FINAL_ROUNDS) value = ctx.myBalance;
     else value = Math.max(gain * 2, ctx.myBalance * 0.5);
+    if (gain > 0) value = Math.max(value, spendDownBid(value, ctx.myBalance, roundsLeft));
   } else {
     // Cheap common letters: a market-rate bid only when the rack needs them.
     if (FLOOR_LETTERS.has(L)) {
@@ -290,6 +307,11 @@ export function decideBid(ctx: BidContext): number {
     if (coinsPerRoundTarget > PACE_PER_ROUND) value *= UNDERSPEND_BOOST;
     // Coins left at the end are worthless, so loosen up as the bag empties.
     if (bagLeft <= 25) value *= 1.3;
+    if (ctx.dictionary && bagLeft <= LATE_BAG && tiles >= MIN_TARGET_RACK) {
+      buildIndex(ctx.dictionary);
+      const r = reachWith(rackCounts(ctx.myRack), L.charCodeAt(0) - 65, tiles);
+      if (r.completes || r.oneAway > 0) value = spendDownBid(value, ctx.myBalance, roundsLeft);
+    }
   }
 
   // No shading: in a Vickrey auction we pay the second-highest bid, so

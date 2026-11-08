@@ -29,6 +29,10 @@ fit a long word.
 - **Endgame (≤12 tiles in the bag):** a letter is worth exactly what it adds
   to the best word we could play right now: `max(2 × gain, 50% of balance)`,
   the whole balance in the last 3 auctions, nothing if it adds nothing.
+- **Spend down:** in the last third (≤22 tiles in the bag), bids on letters
+  that help a word (keep a 7–8 letter word within one tile, or improve our
+  best word in the endgame) are scaled by `1 + (balance − 12) / auctions left`,
+  so leftover coins go into letters instead of being wasted.
 - **No shading:** live matches are Vickrey (the winner pays the second-highest
   bid), so bidding true value is optimal. Bids are capped at our balance.
 - The 7+ letter check scans ~144k long words once per bid (letters stored
@@ -85,3 +89,8 @@ Value-weighted bidding vs the previous version, 30 Vickrey games, same seeds:
 | Average place (of 6) | 4.10 | 3.37 |
 | Reward per word | 17.7 | 22.7 |
 | Win rate | 13.3% | 13.3% |
+
+Spend-down vs value-weighted, 30 Vickrey games: score 71.0 -> 72.9, win
+rate 13.3% -> 16.7%, place 3.37 -> 3.23. Tested and rejected (no gain):
+playing only 8+ letter words in the first third, and holding a 7 mid-match
+to grow it into an 8.
