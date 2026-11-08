@@ -10,26 +10,29 @@ and the score is also paid back as coins.
 
 ## Strategy (`src/strategy.ts`)
 
-### Bidding: spend the budget
+### Bidding: buy high-value letters
 Coins are worth nothing at match end and word rewards are paid back as
-coins, so the bot treats coins purely as a budget to spend.
-- **Base value** of a letter ≈ face value × 2.5 + 2 (its worth inside a long word).
-- **Rack shape:** bid up for vowels when the rack is under ~30% vowels, and for
-  consonants when it's over 50%; small bonus for S, E, R; penalties for a third
-  copy of a letter, Q without U, and a second J/Q/X/Z; ×0.6 once the rack is
-  clogged (10+ tiles).
-- **Floor:** always bid at least 12 (≈ the live average price) on vowels and
-  R, S, T, N, L. Held letters are options, not waste.
-- **Pacing:** if our coins per remaining auction are above 2.5 (the top
-  bots' spending rate), we're under-spending, so bids go up 1.5×. With 13–25
-  tiles left, a further ×1.3.
-- **Endgame (≤12 tiles in the bag):** a letter is worth exactly what it adds to
-  the best word we could play right now. If it adds anything, bid
-  `max(2 × gain, 50% of balance)`, and the whole balance in the last 3
-  auctions; if it adds nothing, don't bid.
-- **No shading:** in a Vickrey auction (live matches) the winner pays the
-  second-highest bid, so bidding true value is optimal. Bids are always
-  capped at our balance.
+coins, so coins are only a budget. The top bots' edge is *which* letters
+they buy: their 7-letter words are built from heavier letters (live, ~40-50
+points vs our ~30), so the budget goes to letters that are worth points and
+fit a long word.
+- **3–5 point letters** (B C M P F H V W Y K): bid 17–20 when the letter keeps
+  7–8 letter words within one tile (more the more words it keeps in reach),
+  and 20 if it completes a 7+ letter word outright.
+- **8–10 point letters** (J Q X Z): same check, bid 22–30.
+- **1-point letters** (vowels, R S T N L): a market-rate floor of 12 only when
+  the rack needs them (vowels below 35% of the rack, R/S/T/N/L above 50%
+  vowels, or a rack under 5 tiles). Otherwise they get the letter-value
+  estimate (face × 2.5 + 2, adjusted for rack balance and duplicates).
+- **Pacing:** if our coins per remaining auction are above 2.5 (the top bots'
+  spending rate), bids go up 1.5×; with 13–25 tiles left, a further ×1.3.
+- **Endgame (≤12 tiles in the bag):** a letter is worth exactly what it adds
+  to the best word we could play right now: `max(2 × gain, 50% of balance)`,
+  the whole balance in the last 3 auctions, nothing if it adds nothing.
+- **No shading:** live matches are Vickrey (the winner pays the second-highest
+  bid), so bidding true value is optimal. Bids are capped at our balance.
+- The 7+ letter check scans ~144k long words once per bid (letters stored
+  sparsely): ~10 ms worst case, well inside an auction.
 
 ### Word play: hold for 7+ letter words
 - Hold letters until we can spell a **7+ letter word** for the 3x multiplier.
@@ -68,5 +71,16 @@ npx tsx sim/sim.ts [games] [vickrey|first|both]
 ```
 The simulator plays `src/strategy.ts` against five opponents calibrated to
 the live top bots (LUCENT, Bron), and compares it on the same seeds with the
-baseline in `sim/strategy.before.ts`. It reports score, letters won, price
-paid, words, word length, reward per word, tiles held and coins left.
+baseline in `sim/strategy.before.ts` (the previous live version). It reports
+score, letters won, price paid, words, word length, reward per word, tiles
+held and coins left. Live matches are Vickrey, so test with
+`npx tsx sim/sim.ts 30 vickrey`.
+
+Value-weighted bidding vs the previous version, 30 Vickrey games, same seeds:
+
+| | Previous | Value-weighted |
+|---|---|---|
+| Score | 60.6 | 71.0 |
+| Average place (of 6) | 4.10 | 3.37 |
+| Reward per word | 17.7 | 22.7 |
+| Win rate | 13.3% | 13.3% |

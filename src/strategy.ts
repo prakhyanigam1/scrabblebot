@@ -21,10 +21,29 @@ const ENDGAME_BAG = 12;
 // under-spending: raise bids by this factor.
 const PACE_PER_ROUND = 2.5;
 const UNDERSPEND_BOOST = 1.5;
-// Always bid at least this (≈ the live average winning price) on vowels and
-// common letters: held letters are options, not waste.
+// Bid at least this (≈ the live average winning price) on vowels and
+// common 1-point letters, but only when the rack needs them: vowels when
+// we're low on vowels, R/S/T/N/L when we're vowel-heavy, either while the
+// rack is too small to build on. Otherwise cheap letters soak up coins
+// that should buy high-value ones.
 const FLOOR_BID = 12;
 const FLOOR_LETTERS = new Set(["A", "E", "I", "O", "U", "R", "S", "T", "N", "L"]);
+const LOW_VOWELS = 0.35;
+const HIGH_VOWELS = 0.5;
+
+// High-value letters are what make the top bots' 7-letter words worth
+// 40-50 vs our ~30 (RackMaw wins 3-5 point letters at ~16.5 and J/Q/X/Z at
+// ~32). Bid MIN..MAX on one that keeps 7–8 letter words within one tile,
+// more the more it keeps in reach, and MAX if it completes a 7+ letter word.
+// 3–5 points: B C M P F H V W Y K.
+const HIGH_VALUE_MIN = 17;
+const HIGH_VALUE_MAX = 20;
+// 8–10 points: J Q X Z.
+const PREMIUM_MIN = 22;
+const PREMIUM_MAX = 30;
+// Below this many tiles no 7-letter word can be one tile away from
+// rack + letter, so the check can't apply.
+const MIN_TARGET_RACK = 5;
 // In the last few auctions coins are about to be worthless: bid them all on
 // any letter that improves our best word.
 const FINAL_ROUNDS = 3;
@@ -60,6 +79,15 @@ interface Entry {
 
 let indexedFrom: string[] | null = null;
 let entries: Entry[] = [];
+// Words of 7+ letters, best score first, letters stored sparsely
+// (index + count) for a fast scan.
+interface LongEntry {
+  e: Entry;
+  len: number;
+  idx: Uint8Array;
+  cnt: Uint8Array;
+}
+let longEntries: LongEntry[] = [];
 
 function buildIndex(dictionary: string[]) {
   if (indexedFrom === dictionary) return;
@@ -80,7 +108,43 @@ function buildIndex(dictionary: string[]) {
   }
   // Highest score first, so the first hit is the best word.
   entries.sort((a, b) => b.score - a.score);
+  longEntries = [];
+  for (const e of entries) {
+    if (e.word.length < 7) continue;
+    const idx: number[] = [];
+    const cnt: number[] = [];
+    for (let i = 0; i < 26; i++) {
+      if (e.counts[i]) {
+        idx.push(i);
+        cnt.push(e.counts[i]!);
+      }
+    }
+    longEntries.push({ e, len: e.word.length, idx: Uint8Array.from(idx), cnt: Uint8Array.from(cnt) });
+  }
   indexedFrom = dictionary;
+}
+
+// What rack + letter `li` offers toward 7+ letter words: whether it spells
+// one now, and how many 7–8 letter words it is exactly one tile short of.
+function reachWith(
+  have: Uint8Array,
+  li: number,
+  tiles: number,
+): { completes: boolean; oneAway: number } {
+  let completes = false;
+  let oneAway = 0;
+  for (const w of longEntries) {
+    if (w.len > tiles + 2) continue; // 2+ tiles short even with the letter
+    let missing = 0;
+    for (let k = 0; k < w.idx.length; k++) {
+      const i = w.idx[k]!;
+      const d = w.cnt[k]! - have[i]! - (i === li ? 1 : 0);
+      if (d > 0 && (missing += d) > 1) break;
+    }
+    if (missing === 0) completes = true;
+    else if (missing === 1 && w.len <= 8) oneAway++;
+  }
+  return { completes, oneAway };
 }
 
 function rackCounts(rack: Map<string, number>): Uint8Array {
@@ -200,8 +264,26 @@ export function decideBid(ctx: BidContext): number {
     else if (roundsLeft <= FINAL_ROUNDS) value = ctx.myBalance;
     else value = Math.max(gain * 2, ctx.myBalance * 0.5);
   } else {
-    // Vowels and common letters are always worth a market-rate bid.
-    if (FLOOR_LETTERS.has(L)) value = Math.max(value, FLOOR_BID);
+    // Cheap common letters: a market-rate bid only when the rack needs them.
+    if (FLOOR_LETTERS.has(L)) {
+      const needed =
+        tiles < MIN_TARGET_RACK ||
+        (VOWELS.has(L) ? vowelRatio < LOW_VOWELS : vowelRatio > HIGH_VOWELS);
+      if (needed) value = Math.max(value, FLOOR_BID);
+    }
+    // High-value letters that keep 7–8 letter words in reach: bid up.
+    if (ctx.dictionary && face >= 3 && tiles >= MIN_TARGET_RACK) {
+      const [lo, hi] = face >= 8 ? [PREMIUM_MIN, PREMIUM_MAX] : [HIGH_VALUE_MIN, HIGH_VALUE_MAX];
+      buildIndex(ctx.dictionary);
+      const { completes, oneAway } = reachWith(rackCounts(ctx.myRack), L.charCodeAt(0) - 65, tiles);
+      if (completes) {
+        value = Math.max(value, hi);
+      } else if (oneAway > 0) {
+        // 1 word in reach -> lo, 31+ words -> hi.
+        const t = Math.min(1, Math.log2(1 + oneAway) / 5);
+        value = Math.max(value, lo + (hi - lo) * t);
+      }
+    }
     // Pace spending evenly over the match. myBalance already includes what
     // our words earned, so new coins go straight back into bidding.
     const coinsPerRoundTarget = ctx.myBalance / roundsLeft;
