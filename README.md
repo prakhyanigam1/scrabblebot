@@ -71,7 +71,8 @@ npx tsx sim/sim.ts [games] [vickrey|first|both]
 ```
 The simulator plays `src/strategy.ts` against five opponents calibrated to
 the live top bots (LUCENT, Bron), and compares it on the same seeds with the
-baseline in `sim/strategy.before.ts` (the previous live version). It reports
+baseline in `sim/strategy.before.ts` (the current live version, which a new
+candidate has to beat). It reports
 score, letters won, price paid, words, word length, reward per word, tiles
 held and coins left. Live matches are Vickrey, so test with
 `npx tsx sim/sim.ts 30 vickrey`.
